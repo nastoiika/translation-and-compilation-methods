@@ -2,63 +2,117 @@ import re
 import sys
 
 
+def check_comments(code):
+    errors = []
+
+    i = 0
+    n = len(code)
+    state = "NORMAL"
+
+    while i < n:
+        c = code[i]
+        nxt = code[i + 1] if i + 1 < n else ''
+
+        if state == "NORMAL":
+            if c == '"':
+                state = "IN_STRING"
+            elif c == "'":
+                state = "IN_CHAR"
+            elif c == '/' and nxt == '/':
+                state = "IN_SINGLE_COMMENT"
+                i += 1
+            elif c == '/' and nxt == '*':
+                state = "IN_MULTI_COMMENT"
+                i += 1
+            elif c == '*' and nxt == '/':
+                errors.append("Ошибка: найдено '*/' без соответствующего '/*'")
+                return errors
+
+        elif state == "IN_STRING":
+            if c == '\\':
+                i += 1
+            elif c == '"':
+                state = "NORMAL"
+
+        elif state == "IN_CHAR":
+            if c == '\\':
+                i += 1
+            elif c == "'":
+                state = "NORMAL"
+
+        elif state == "IN_SINGLE_COMMENT":
+            if c == '\n':
+                state = "NORMAL"
+
+        elif state == "IN_MULTI_COMMENT":
+            if c == '*' and nxt == '/':
+                state = "NORMAL"
+                i += 1
+
+        i += 1
+
+    if state == "IN_MULTI_COMMENT":
+        errors.append("Ошибка: незакрытый многострочный комментарий")
+
+    return errors
+
+
+def remove_comments(code):
+    # удаление /* ... */
+    code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
+    # удаление //
+    code = re.sub(r'//.*', '', code)
+    return code
+
+
 def clean_cpp_code(source_code):
     errors = []
     info = []
 
-    # --- Проверка незакрытого многострочного комментария /* ... */ ---
-    # Считаем вхождения /* и */
-    open_count = len(re.findall(r'/\*', source_code))
-    close_count = len(re.findall(r'\*/', source_code))
-    if open_count != close_count:
-        errors.append(
-            f"Ошибка: незакрытый многострочный комментарий "
-            f"(найдено '/*': {open_count}, '*/': {close_count})"
-        )
+    # --- 1. Валидация комментариев ---
+    errors.extend(check_comments(source_code))
+    if errors:
+        return "", info, errors
 
-    # --- Удалить строковые и символьные литералы временно,
-    #     чтобы не трогать // и /* внутри строк ---
-    # Заменяем их заглушками, потом вернём
+    # --- 2. Временно убираем строки и char ---
     literals = []
 
     def save_literal(m):
         literals.append(m.group(0))
         return f"\x00LIT{len(literals) - 1}\x00"
 
-    # Строковые литералы "..."  (с учётом экранирования)
     source_code = re.sub(r'"(?:[^"\\]|\\.)*"', save_literal, source_code)
-    # Символьные литералы '.'
     source_code = re.sub(r"'(?:[^'\\]|\\.)*'", save_literal, source_code)
 
-    # --- Удалить многострочные комментарии /* ... */ ---
+    # --- 3. Удаляем комментарии ---
     removed_ml = re.findall(r'/\*.*?\*/', source_code, flags=re.DOTALL)
     if removed_ml:
         info.append(f"Информация: удалено многострочных комментариев: {len(removed_ml)}")
+
     source_code = re.sub(r'/\*.*?\*/', '', source_code, flags=re.DOTALL)
 
-    # --- Удалить однострочные комментарии // ---
     removed_sl = re.findall(r'//.*', source_code)
     if removed_sl:
         info.append(f"Информация: удалено однострочных комментариев: {len(removed_sl)}")
+
     source_code = re.sub(r'//.*', '', source_code)
 
-    # --- Вернуть строковые литералы ---
+    # --- 4. Возвращаем литералы ---
     for i, lit in enumerate(literals):
         source_code = source_code.replace(f"\x00LIT{i}\x00", lit)
 
-    # --- Удалить пробелы/табы в начале и конце строк ---
+    # --- 5. Очистка форматирования ---
     source_code = re.sub(r'^[ \t]+|[ \t]+$', '', source_code, flags=re.MULTILINE)
-
-    # --- Удалить пустые строки ---
     source_code = re.sub(r'\n{2,}', '\n', source_code)
     source_code = source_code.strip()
 
-    # --- Проверка недопустимых символов (управляющие, кроме \t \n \r) ---
-    invalid = re.findall(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', source_code)
+    # --- 6. Проверка недопустимых символов (строгий ASCII) ---
+    invalid = re.findall(r'[^\x09\x0A\x0D\x20-\x7E]', source_code)
+
     if invalid:
-        unique = sorted(set(f"\\x{ord(c):02X}" for c in invalid))
+        unique = sorted(set(f"U+{ord(c):04X}" for c in invalid))
         errors.append(
-            f"Ошибка: обнаружены недопустимые управляющие символы: {', '.join(unique)}"
+            f"Ошибка: обнаружены недопустимые символы: {', '.join(unique)}"
         )
 
     return source_code, info, errors
@@ -79,27 +133,24 @@ if __name__ == "__main__":
 
     cleaned_code, info_messages, errors = clean_cpp_code(code)
 
-    # --- Вывод информационных сообщений ---
+    # --- Ошибки ---
+    if errors:
+        print("Сообщения об ошибках:")
+        for err in errors:
+            print(f"  {err}")
+        sys.exit(1)
+
+    # --- Информация ---
     if info_messages:
         print("Информационные сообщения:")
         for msg in info_messages:
             print(f"  {msg}")
         print()
 
-    # --- Вывод ошибок ---
-    if errors:
-        print("Сообщения об ошибках:")
-        for err in errors:
-            print(f"  {err}")
-        print()
-
-    # --- Вывод очищенного кода ---
+    # --- Результат ---
     print("Очищенный код:")
     print("-" * 60)
     print(cleaned_code)
     print("-" * 60)
 
-    if not errors:
-        print("Ошибок не обнаружено.")
-    else:
-        print("Обнаружены ошибки. Смотрите сообщения выше.")
+    print("Ошибок не обнаружено.")
